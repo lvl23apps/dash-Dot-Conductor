@@ -83,10 +83,31 @@ void DashDotConductorProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
     // Clear the buffer
     buffer.clear();
     
-    // Process the MIDI events
+    // Important: Create a new MidiBuffer for the output to ensure messages get written to the track
+    juce::MidiBuffer outputBuffer;
+    
+    // Process the MIDI events - add current note to the output buffer
     if (!generatedNotes.isEmpty() && currentNoteIndex < generatedNotes.size()) {
-        midiMessages.addEvent(generatedNotes[currentNoteIndex], 0);
+        // Calculate appropriate sample position within the buffer
+        int samplePosition = 0; // Start at the beginning of the buffer
+        
+        // Add the current note to the output buffer
+        outputBuffer.addEvent(generatedNotes[currentNoteIndex], samplePosition);
+        
+        // Increment to the next note for next time
         currentNoteIndex++;
+        
+        // Loop back to beginning if we've reached the end
+        if (currentNoteIndex >= generatedNotes.size()) {
+            // Only reset if we want looping behavior
+            if (/* DISABLES CODE */ (false)) { // Set to true if you want looping
+                currentNoteIndex = 0;
+            }
+        }
+        
+        // Debug output
+        DBG("Added MIDI event to buffer, index: " + juce::String(currentNoteIndex-1) +
+            " of " + juce::String(generatedNotes.size()));
     }
     
     // Capture incoming MIDI for conversion to Morse
@@ -94,8 +115,6 @@ void DashDotConductorProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
         midiChanged = true;
         
         // Process incoming MIDI and store notes for conversion
-        midiNotes.clear();
-        
         for (const auto metadata : midiMessages) {
             auto message = metadata.getMessage();
             
@@ -105,6 +124,9 @@ void DashDotConductorProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
                 note.startTime = metadata.samplePosition / currentSampleRate;
                 note.duration = 0.0; // Will be set when note off is received
                 midiNotes.add(note);
+                
+                // Also pass through this MIDI message
+                outputBuffer.addEvent(message, metadata.samplePosition);
             }
             else if (message.isNoteOff()) {
                 // Find the matching note on and update its duration
@@ -115,9 +137,19 @@ void DashDotConductorProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
                         break;
                     }
                 }
+                
+                // Also pass through this MIDI message
+                outputBuffer.addEvent(message, metadata.samplePosition);
+            }
+            else {
+                // Pass through any other MIDI messages
+                outputBuffer.addEvent(message, metadata.samplePosition);
             }
         }
     }
+    
+    // Replace the input MIDI buffer with our output buffer
+    midiMessages.swapWith(outputBuffer);
 }
 
 juce::AudioProcessorEditor* DashDotConductorProcessor::createEditor() {
@@ -222,6 +254,7 @@ void DashDotConductorProcessor::generateMIDINotes() {
     double currentTime = 0.0;  // in beats
     int midiChannelIndex = *midiChannel - 1;  // MIDI channels are 0-based internally
     
+    // Store the MIDI messages with proper timestamps
     for (int i = 0; i < morseInput.length(); ++i) {
         char c = morseInput[i];
         
@@ -230,7 +263,7 @@ void DashDotConductorProcessor::generateMIDINotes() {
             juce::MidiMessage noteOn = juce::MidiMessage::noteOn(midiChannelIndex, *dotNoteNumber, static_cast<float>(*dotVelocity) / 127.0f);
             generatedNotes.add(noteOn);
             
-            // Add Note Off for dot
+            // Add Note Off for dot with proper timestamp
             juce::MidiMessage noteOff = juce::MidiMessage::noteOff(midiChannelIndex, *dotNoteNumber);
             currentTime += *dotDuration;
             generatedNotes.add(noteOff);
@@ -245,7 +278,7 @@ void DashDotConductorProcessor::generateMIDINotes() {
             juce::MidiMessage noteOn = juce::MidiMessage::noteOn(midiChannelIndex, *dashNoteNumber, static_cast<float>(*dashVelocity) / 127.0f);
             generatedNotes.add(noteOn);
             
-            // Add Note Off for dash
+            // Add Note Off for dash with proper timestamp
             juce::MidiMessage noteOff = juce::MidiMessage::noteOff(midiChannelIndex, *dashNoteNumber);
             currentTime += *dashDuration;
             generatedNotes.add(noteOff);
@@ -264,9 +297,28 @@ void DashDotConductorProcessor::generateMIDINotes() {
             currentTime += *wordGap;
         }
     }
+    
+    // Print debug info
+    DBG("Generated " + juce::String(generatedNotes.size()) + " MIDI messages");
 }
 
-// Add the new MIDI to Morse and Morse to Text conversion functions
+// Add a new method to handle text input from Morse code
+void DashDotConductorEditor::morseInputChanged() {
+    // Get the Morse code from the editor
+    juce::String morseCode = morseOutput.getText();
+    
+    // Convert it to text
+    juce::String decodedText = processor.convertMorseToText(morseCode);
+    
+    // Update the text input field without triggering another change event
+    textInput.setText(decodedText, juce::dontSendNotification);
+    
+    // Update the decoded text field
+    decodedTextOutput.setText(decodedText, juce::dontSendNotification);
+    
+    // Update the processor with the new Morse input
+    processor.setMorseInput(morseCode);
+}
 
 juce::String DashDotConductorProcessor::convertMIDIToMorse(const juce::MidiBuffer& midiBuffer) {
     juce::String morseCode;
@@ -345,31 +397,66 @@ juce::String DashDotConductorProcessor::convertMIDIToMorse(const juce::MidiBuffe
 }
 
 juce::String DashDotConductorProcessor::convertMorseToText(const juce::String& morseCode) {
+    // Define this here too for safety
+    static const int MORSE_TABLE_SIZE = 37;
+    
     juce::String result;
-    juce::StringArray morseWords;
     
-    // Split by word delimiter (/)
-    morseWords = juce::StringArray::fromTokens(morseCode, "/", "");
+    // Print the entire Morse table for debugging
+    DBG("Morse Table Contents:");
+    for (int i = 0; i < MORSE_TABLE_SIZE; ++i) {
+        DBG("  [" + juce::String(i) + "] '" + juce::String(morseTable[i].character) +
+            "' -> \"" + juce::String(morseTable[i].code) + "\"");
+    }
     
-    for (const auto& word : morseWords) {
-        // Split by letter delimiter (space)
+    // Debug output
+    DBG("Converting morse: \"" + morseCode + "\"");
+    
+    // Split into words (separated by "/")
+    juce::StringArray words;
+    if (morseCode.contains("/")) {
+        words = juce::StringArray::fromTokens(morseCode, "/", "");
+    } else {
+        // If no "/" is found, treat the entire string as a single word
+        words.add(morseCode);
+    }
+    
+    DBG("Split into " + juce::String(words.size()) + " words");
+    
+    for (auto& word : words) {
+        // Split word into letters (separated by spaces)
         juce::StringArray letters = juce::StringArray::fromTokens(word.trim(), " ", "");
         
-        for (const auto& letter : letters) {
-            bool found = false;
+        DBG("Word split into " + juce::String(letters.size()) + " letters");
+        
+        for (auto& letter : letters) {
+            // Skip empty letters
+            if (letter.isEmpty()) {
+                DBG("Empty letter, skipping");
+                continue;
+            }
+                
+            // Debug each letter
+            DBG("Processing morse letter: \"" + letter + "\"");
             
-            // Find the Morse code in the lookup table
-            for (int i = 0; i < sizeof(morseTable) / sizeof(morseTable[0]); ++i) {
-                if (letter == morseTable[i].code) {
+            bool found = false;
+            // Check each entry in the morse table
+            for (int i = 0; i < MORSE_TABLE_SIZE; ++i) {
+                const juce::String tableCode = morseTable[i].code;
+                
+                // Use string comparison instead of pointer comparison
+                if (letter.compare(tableCode) == 0) {
                     result += morseTable[i].character;
                     found = true;
+                    DBG("Matched to character: '" + juce::String(morseTable[i].character) + "'");
                     break;
                 }
             }
             
             // If not found, add a placeholder
-            if (!found && letter.isNotEmpty()) {
+            if (!found) {
                 result += "?";
+                DBG("No match found for: \"" + letter + "\"");
             }
         }
         
@@ -377,6 +464,7 @@ juce::String DashDotConductorProcessor::convertMorseToText(const juce::String& m
         result += " ";
     }
     
+    DBG("Final converted text: \"" + result.trim() + "\"");
     return result.trim();
 }
 
@@ -386,7 +474,12 @@ DashDotConductorEditor::DashDotConductorEditor(DashDotConductorProcessor& p)
     // Set up text input
     addAndMakeVisible(titleLabel);
     titleLabel.setText("Dash Dot Conductor", juce::dontSendNotification);
-    titleLabel.setFont(juce::Font(juce::Font::getDefaultSansSerifFontName(), 18.0f, juce::Font::bold));
+    
+    // Create a standard font with a larger size (avoids deprecation warning)
+    titleLabel.setFont(juce::Font(18.0f));
+    
+    // Define a constant for the size of the morse table
+    static const int MORSE_TABLE_SIZE = 37; // Number of entries in morseTable
     titleLabel.setJustificationType(juce::Justification::centred);
     
     addAndMakeVisible(textLabel);
@@ -433,62 +526,181 @@ DashDotConductorEditor::DashDotConductorEditor(DashDotConductorProcessor& p)
     decodeMIDIButton.setButtonText("Decode MIDI to Morse/Text");
     decodeMIDIButton.addListener(this);
     
-    // Parameter sliders
+    // Parameter sliders with terminal styling
     addAndMakeVisible(dotNoteLabel);
-    dotNoteLabel.setText("Dot Note", juce::dontSendNotification);
+    dotNoteLabel.setText("Dot Note (MIDI)", juce::dontSendNotification);
+    dotNoteLabel.setColour(juce::Label::textColourId, juce::Colours::green);
+    
     addAndMakeVisible(dotNoteSlider);
     dotNoteSlider.setRange(0, 127, 1);
     dotNoteSlider.setValue(processor.dotNoteNumber->get());
     dotNoteSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    // Terminal styling
+    dotNoteSlider.setColour(juce::Slider::backgroundColourId, juce::Colours::darkgreen);
+    dotNoteSlider.setColour(juce::Slider::trackColourId, juce::Colours::green);
+    dotNoteSlider.setColour(juce::Slider::thumbColourId, juce::Colours::lightgreen);
+    dotNoteSlider.setColour(juce::Slider::textBoxTextColourId, juce::Colours::green);
+    dotNoteSlider.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::black);
+    dotNoteSlider.setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::darkgreen);
     
     addAndMakeVisible(dashNoteLabel);
-    dashNoteLabel.setText("Dash Note", juce::dontSendNotification);
+    dashNoteLabel.setText("Dash Note (MIDI)", juce::dontSendNotification);
+    dashNoteLabel.setColour(juce::Label::textColourId, juce::Colours::green);
+    
     addAndMakeVisible(dashNoteSlider);
     dashNoteSlider.setRange(0, 127, 1);
     dashNoteSlider.setValue(processor.dashNoteNumber->get());
     dashNoteSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    // Terminal styling
+    dashNoteSlider.setColour(juce::Slider::backgroundColourId, juce::Colours::darkgreen);
+    dashNoteSlider.setColour(juce::Slider::trackColourId, juce::Colours::green);
+    dashNoteSlider.setColour(juce::Slider::thumbColourId, juce::Colours::lightgreen);
+    dashNoteSlider.setColour(juce::Slider::textBoxTextColourId, juce::Colours::green);
+    dashNoteSlider.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::black);
+    dashNoteSlider.setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::darkgreen);
     
     addAndMakeVisible(dotDurationLabel);
-    dotDurationLabel.setText("Dot Duration", juce::dontSendNotification);
+    dotDurationLabel.setText("Dot Duration (beats)", juce::dontSendNotification);
+    dotDurationLabel.setColour(juce::Label::textColourId, juce::Colours::green);
+    
     addAndMakeVisible(dotDurationSlider);
     dotDurationSlider.setRange(0.1, 1.0, 0.05);
     dotDurationSlider.setValue(processor.dotDuration->get());
     dotDurationSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    // Terminal styling
+    dotDurationSlider.setColour(juce::Slider::backgroundColourId, juce::Colours::darkgreen);
+    dotDurationSlider.setColour(juce::Slider::trackColourId, juce::Colours::green);
+    dotDurationSlider.setColour(juce::Slider::thumbColourId, juce::Colours::lightgreen);
+    dotDurationSlider.setColour(juce::Slider::textBoxTextColourId, juce::Colours::green);
+    dotDurationSlider.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::black);
+    dotDurationSlider.setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::darkgreen);
     
     addAndMakeVisible(dashDurationLabel);
-    dashDurationLabel.setText("Dash Duration", juce::dontSendNotification);
+    dashDurationLabel.setText("Dash Duration (beats)", juce::dontSendNotification);
+    dashDurationLabel.setColour(juce::Label::textColourId, juce::Colours::green);
+    
     addAndMakeVisible(dashDurationSlider);
     dashDurationSlider.setRange(0.1, 2.0, 0.05);
     dashDurationSlider.setValue(processor.dashDuration->get());
     dashDurationSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    // Terminal styling
+    dashDurationSlider.setColour(juce::Slider::backgroundColourId, juce::Colours::darkgreen);
+    dashDurationSlider.setColour(juce::Slider::trackColourId, juce::Colours::green);
+    dashDurationSlider.setColour(juce::Slider::thumbColourId, juce::Colours::lightgreen);
+    dashDurationSlider.setColour(juce::Slider::textBoxTextColourId, juce::Colours::green);
+    dashDurationSlider.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::black);
+    dashDurationSlider.setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::darkgreen);
     
     addAndMakeVisible(dotVelocityLabel);
-    dotVelocityLabel.setText("Dot Velocity", juce::dontSendNotification);
+    dotVelocityLabel.setText("Dot Velocity (1-127)", juce::dontSendNotification);
+    dotVelocityLabel.setColour(juce::Label::textColourId, juce::Colours::green);
+    
     addAndMakeVisible(dotVelocitySlider);
     dotVelocitySlider.setRange(1, 127, 1);
     dotVelocitySlider.setValue(processor.dotVelocity->get());
     dotVelocitySlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    // Terminal styling
+    dotVelocitySlider.setColour(juce::Slider::backgroundColourId, juce::Colours::darkgreen);
+    dotVelocitySlider.setColour(juce::Slider::trackColourId, juce::Colours::green);
+    dotVelocitySlider.setColour(juce::Slider::thumbColourId, juce::Colours::lightgreen);
+    dotVelocitySlider.setColour(juce::Slider::textBoxTextColourId, juce::Colours::green);
+    dotVelocitySlider.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::black);
+    dotVelocitySlider.setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::darkgreen);
     
     addAndMakeVisible(dashVelocityLabel);
-    dashVelocityLabel.setText("Dash Velocity", juce::dontSendNotification);
+    dashVelocityLabel.setText("Dash Velocity (1-127)", juce::dontSendNotification);
+    dashVelocityLabel.setColour(juce::Label::textColourId, juce::Colours::green);
+    
     addAndMakeVisible(dashVelocitySlider);
     dashVelocitySlider.setRange(1, 127, 1);
     dashVelocitySlider.setValue(processor.dashVelocity->get());
     dashVelocitySlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+    // Terminal styling
+    dashVelocitySlider.setColour(juce::Slider::backgroundColourId, juce::Colours::darkgreen);
+    dashVelocitySlider.setColour(juce::Slider::trackColourId, juce::Colours::green);
+    dashVelocitySlider.setColour(juce::Slider::thumbColourId, juce::Colours::lightgreen);
+    dashVelocitySlider.setColour(juce::Slider::textBoxTextColourId, juce::Colours::green);
+    dashVelocitySlider.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::black);
+    dashVelocitySlider.setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::darkgreen);
+    
+    // Connect the sliders to real-time value change handlers
+    dotNoteSlider.onValueChange = [this] {
+        *processor.dotNoteNumber = (int)dotNoteSlider.getValue();
+    };
+    
+    dashNoteSlider.onValueChange = [this] {
+        *processor.dashNoteNumber = (int)dashNoteSlider.getValue();
+    };
+    
+    dotDurationSlider.onValueChange = [this] {
+        *processor.dotDuration = (float)dotDurationSlider.getValue();
+    };
+    
+    dashDurationSlider.onValueChange = [this] {
+        *processor.dashDuration = (float)dashDurationSlider.getValue();
+    };
+    
+    dotVelocitySlider.onValueChange = [this] {
+        *processor.dotVelocity = (int)dotVelocitySlider.getValue();
+    };
+    
+    dashVelocitySlider.onValueChange = [this] {
+        *processor.dashVelocity = (int)dashVelocitySlider.getValue();
+    };
     
     // Window size
     setSize(500, 580);
     
     // Send initial Morse code to processor
     processor.setMorseInput(convertTextToMorse(textInput.getText()));
+    
+    // Start timer to check for MIDI input (check every 100ms)
+    startTimer(100);
+    
+    // Send initial Morse code to processor
+    processor.setMorseInput(convertTextToMorse(textInput.getText()));
 }
 
 DashDotConductorEditor::~DashDotConductorEditor() {
+    // Stop the timer when editor is destroyed
+    stopTimer();
 }
 
 void DashDotConductorEditor::paint(juce::Graphics& g) {
-    g.fillAll(juce::Colours::white);
-    g.setColour(juce::Colours::black);
+    // Terminal-like black background
+    g.fillAll(juce::Colours::black);
+    g.setColour(juce::Colours::green);
+    
+    // Add a terminal-style header border
+    g.drawRect(getLocalBounds(), 1);
+    
+    // Add a terminal cursor effect at the bottom if desired
+    int cursorY = getHeight() - 15;
+    g.fillRect(10, cursorY, 8, 2);
+}
+
+// Add timer callback implementation
+void DashDotConductorEditor::timerCallback()
+{
+    // Check if new MIDI has been received
+    if (processor.getMidiChanged())
+    {
+        // Convert the MIDI notes to Morse code
+        juce::String morseCode = processor.convertMIDIToMorse(juce::MidiBuffer());
+        
+        // Update the interface
+        if (morseCode.isNotEmpty()) {
+            morseOutput.setText(morseCode, juce::dontSendNotification);
+            
+            // Convert Morse to text
+            juce::String decodedText = processor.convertMorseToText(morseCode);
+            decodedTextOutput.setText(decodedText, juce::dontSendNotification);
+            textInput.setText(decodedText, juce::dontSendNotification);
+        }
+        
+        // Reset the flag
+        processor.resetMidiChanged();
+    }
 }
 
 void DashDotConductorEditor::resized() {
@@ -566,14 +778,28 @@ void DashDotConductorEditor::resized() {
 
 void DashDotConductorEditor::textEditorTextChanged(juce::TextEditor& editor) {
     if (&editor == &textInput) {
+        // Text to Morse conversion
         juce::String morseCode = convertTextToMorse(editor.getText());
         morseOutput.setText(morseCode, juce::dontSendNotification);
         processor.setMorseInput(morseCode);
+    }
+    else if (&editor == &morseOutput) {
+        // Morse to Text conversion
+        morseInputChanged();
     }
 }
 
 void DashDotConductorEditor::buttonClicked(juce::Button* button) {
     if (button == &generateButton) {
+        // Update parameter values from sliders before generating
+        *processor.dotNoteNumber = (int)dotNoteSlider.getValue();
+        *processor.dashNoteNumber = (int)dashNoteSlider.getValue();
+        *processor.dotDuration = (float)dotDurationSlider.getValue();
+        *processor.dashDuration = (float)dashDurationSlider.getValue();
+        *processor.dotVelocity = (int)dotVelocitySlider.getValue();
+        *processor.dashVelocity = (int)dashVelocitySlider.getValue();
+        
+        // Generate MIDI notes
         processor.generateMIDINotes();
     }
     else if (button == &decodeMIDIButton) {
@@ -589,24 +815,39 @@ void DashDotConductorEditor::buttonClicked(juce::Button* button) {
 }
 
 juce::String DashDotConductorEditor::convertTextToMorse(const juce::String& text) {
+    // Define this here too for safety
+    static const int MORSE_TABLE_SIZE = 37;
+    
     juce::String result;
     juce::String upperText = text.toUpperCase();
+    
+    // Debug output
+    DBG("Converting text to morse: " + upperText);
     
     for (int i = 0; i < upperText.length(); ++i) {
         char c = upperText[i];
         bool found = false;
         
-        // Find the character in the morse table
-        for (int j = 0; j < sizeof(morseTable) / sizeof(morseTable[0]); ++j) {
-            if (morseTable[j].character == c) {
-                result += morseTable[j].code;
-                found = true;
-                break;
+        // Handle space character specially
+        if (c == ' ') {
+            result += "/";
+            found = true;
+            DBG("Converted space to /");
+        } else {
+            // Find the character in the morse table
+            for (int j = 0; j < MORSE_TABLE_SIZE; ++j) {
+                if (morseTable[j].character == c) {
+                    result += morseTable[j].code;
+                    DBG("Converted character: " + juce::String(c) + " to morse: " + juce::String(morseTable[j].code));
+                    found = true;
+                    break;
+                }
             }
         }
         
         // If character is not found in the table, ignore it
-        if (!found && c != ' ') {
+        if (!found) {
+            DBG("No morse equivalent found for: " + juce::String(c));
             continue;
         }
         
@@ -616,6 +857,7 @@ juce::String DashDotConductorEditor::convertTextToMorse(const juce::String& text
         }
     }
     
+    DBG("Final morse code: " + result);
     return result;
 }
 
