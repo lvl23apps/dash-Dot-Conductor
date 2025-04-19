@@ -40,6 +40,9 @@ struct MorseSymbol {
     const char* code;
 };
 
+// Morse code table size
+static const int MORSE_TABLE_SIZE = 37; // Number of entries in morseTable
+
 // Morse code mapping
 static const MorseSymbol morseTable[] = {
     {'A', ".-"},
@@ -128,6 +131,12 @@ public:
     // MIDI to Morse code conversion
     juce::String convertMIDIToMorse(const juce::MidiBuffer& midiBuffer);
     juce::String convertMorseToText(const juce::String& morseCode);
+    
+    // Get midiChanged flag to detect new incoming MIDI
+    bool getMidiChanged() { return midiChanged; }
+    
+    // Reset midiChanged flag after processing
+    void resetMidiChanged() { midiChanged = false; }
 
 private:
     juce::String morseInput;
@@ -152,7 +161,8 @@ private:
 
 class DashDotConductorEditor : public juce::AudioProcessorEditor,
                           public juce::TextEditor::Listener,
-                          public juce::Button::Listener {
+                          public juce::Button::Listener,
+                          private juce::Timer {
 public:
     DashDotConductorEditor(DashDotConductorProcessor&);
     ~DashDotConductorEditor() override;
@@ -161,6 +171,12 @@ public:
     void resized() override;
     void textEditorTextChanged(juce::TextEditor&) override;
     void buttonClicked(juce::Button* button) override;
+    
+    // Timer callback to poll for MIDI input
+    void timerCallback() override;
+    
+    // New method to handle Morse code input changes
+    void morseInputChanged();
 
 private:
     DashDotConductorProcessor& processor;
