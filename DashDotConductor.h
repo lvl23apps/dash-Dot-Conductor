@@ -1,3 +1,16 @@
+/* Dash Dot Conductor - A Bidirectional Morse Code MIDI Converter
+ * Created by Scotland (LVL23)
+ * 
+ * "The Universe says simply, and with an elegance that has little to do with 
+ * feelings: Here is your existence. You are free to interpret it however you wish."
+ * - Iain M. Banks
+ * 
+ * OwO What's this? A Morse code converter? *nuzzles your MIDI notes*
+ * Let's turn your bweeps and boops into the most kawaii Morse patterns! UwU
+ * 
+ * Version 1.0.0 - April 2025
+ */
+
 // DashDotConductor.h
 #pragma once
 
