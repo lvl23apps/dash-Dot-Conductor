@@ -1,7 +1,9 @@
-// DashDotConductor.cpp
-/* Dash Dot Conductor - A Bidirectional Morse Code MIDI Converter
+/*
+  ==============================================================================
+
+ * Dash Dot Conductor - A Bidirectional Morse Code MIDI Converter
  * Created by Scotland (LVL23)
- * 
+ *
  * ⠀⠀⠀⠀⠀⠀⠀⠀⣠⣤⣀⢀⠀⠀⠀⢀⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀
  * ⠀⠀⠀⠀⠀⠀⠀⣴⠏⠁⠹⠿⣧⠀⣰⠋⠁⠉⠳⡄⠀⠀⠀⠀⠀⠀⠀⠀
  * ⠀⠀⠀⠀⠀⠀⠀⡏⠀⠀⠀⡇⢻⢠⣯⠀⠀⠈⢂⢻⡐⠀⠀⠀⠀⠀⠀⠀
@@ -16,16 +18,21 @@
  * ⠀⠀⠀⠀⠀⢻⣿⣶⣦⣄⡀⠀⠀⠀⠰⣿⣏⣤⣞⣀⣼⣿⠀⠀⠀⠀⠀⠀
  * ⠀⠀⠀⠀⠀⠀⠈⠉⠉⠙⢿⣦⣄⣤⣴⡾⠛⠉⠟⠉⠉⠀⠀⠀⠀⠀⠀⠀
  * ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠙⠛⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
- * 
- * "The Universe says simply, and with an elegance that has little to do with 
+ *
+ * "The Universe says simply, and with an elegance that has little to do with
  * feelings: Here is your existence. You are free to interpret it however you wish."
  * - Iain M. Banks
- * 
+ *
  * OwO What's this? A Morse code converter? *nuzzles your MIDI notes*
  * Let's turn your bweeps and boops into the most kawaii Morse patterns! UwU
- * 
+ *
  * Version 1.0.0 - April 2025
- */
+
+  ==============================================================================
+*/
+
+// DashDotConductor.cpp
+
 
 #include "DashDotConductor.h"
 
@@ -83,7 +90,7 @@ void DashDotConductorProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
     }
     
     // Capture incoming MIDI for conversion to Morse
-    if (!midiMessages.isEmpty() && midiMessages != juce::MidiBuffer()) {
+    if (!midiMessages.isEmpty()) {
         midiChanged = true;
         
         // Process incoming MIDI and store notes for conversion
@@ -103,7 +110,8 @@ void DashDotConductorProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
                 // Find the matching note on and update its duration
                 for (int i = midiNotes.size() - 1; i >= 0; --i) {
                     if (midiNotes[i].noteNumber == message.getNoteNumber() && midiNotes[i].duration == 0.0) {
-                        midiNotes[i].duration = (metadata.samplePosition / currentSampleRate) - midiNotes[i].startTime;
+                        auto& note = midiNotes.getReference(i);
+                        note.duration = (metadata.samplePosition / currentSampleRate) - note.startTime;
                         break;
                     }
                 }
@@ -190,7 +198,8 @@ void DashDotConductorProcessor::setStateInformation(const void* data, int sizeIn
         *wordGap = stream.readFloat();
         *midiChannel = stream.readInt();
         *autoGenerateParam = stream.readBool();
-        inputTextParam->setIndex(stream.readInt());
+        int choiceIndex = stream.readInt();
+        *inputTextParam = choiceIndex;
         morseInput = stream.readString();
         
         if (*autoGenerateParam)
@@ -218,7 +227,7 @@ void DashDotConductorProcessor::generateMIDINotes() {
         
         if (c == '.') {
             // Add Note On for dot
-            juce::MidiMessage noteOn = juce::MidiMessage::noteOn(midiChannelIndex, *dotNoteNumber, (uint8) *dotVelocity);
+            juce::MidiMessage noteOn = juce::MidiMessage::noteOn(midiChannelIndex, *dotNoteNumber, static_cast<float>(*dotVelocity) / 127.0f);
             generatedNotes.add(noteOn);
             
             // Add Note Off for dot
@@ -233,7 +242,7 @@ void DashDotConductorProcessor::generateMIDINotes() {
         }
         else if (c == '-') {
             // Add Note On for dash
-            juce::MidiMessage noteOn = juce::MidiMessage::noteOn(midiChannelIndex, *dashNoteNumber, (uint8) *dashVelocity);
+            juce::MidiMessage noteOn = juce::MidiMessage::noteOn(midiChannelIndex, *dashNoteNumber, static_cast<float>(*dashVelocity) / 127.0f);
             generatedNotes.add(noteOn);
             
             // Add Note Off for dash
@@ -257,13 +266,127 @@ void DashDotConductorProcessor::generateMIDINotes() {
     }
 }
 
+// Add the new MIDI to Morse and Morse to Text conversion functions
+
+juce::String DashDotConductorProcessor::convertMIDIToMorse(const juce::MidiBuffer& midiBuffer) {
+    juce::String morseCode;
+    
+    // Sort MIDI notes by start time
+    struct {
+        bool operator()(const MIDINote& a, const MIDINote& b) const { return a.startTime < b.startTime; }
+    } customSort;
+    
+    juce::Array<MIDINote> sortedNotes = midiNotes;
+    std::sort(sortedNotes.begin(), sortedNotes.end(), customSort);
+    
+    // Analyze patterns to determine dots and dashes
+    double avgDuration = 0.0;
+    if (!sortedNotes.isEmpty()) {
+        // Calculate average duration to help determine dots vs dashes
+        double totalDuration = 0.0;
+        for (const auto& note : sortedNotes) {
+            totalDuration += note.duration;
+        }
+        avgDuration = totalDuration / sortedNotes.size();
+    }
+    
+    // Threshold to distinguish dots from dashes (ratio)
+    const double dotDashThreshold = 0.67;
+    
+    // Analyze time gaps to determine letter and word boundaries
+    double avgGap = 0.0;
+    if (sortedNotes.size() > 1) {
+        double totalGap = 0.0;
+        int gapCount = 0;
+        
+        for (int i = 1; i < sortedNotes.size(); ++i) {
+            double gap = sortedNotes[i].startTime - (sortedNotes[i-1].startTime + sortedNotes[i-1].duration);
+            if (gap > 0.01) { // Ignore very small gaps
+                totalGap += gap;
+                gapCount++;
+            }
+        }
+        
+        if (gapCount > 0) {
+            avgGap = totalGap / gapCount;
+        }
+    }
+    
+    // Constants for gap classification
+    const double symbolGapThreshold = 0.5;  // Below this ratio of avgGap is a symbol gap
+    const double letterGapThreshold = 1.5;  // Above symbolGap but below this is a letter gap
+                                           // Above letterGap is a word gap
+    
+    // Interpret the notes as Morse code
+    for (int i = 0; i < sortedNotes.size(); ++i) {
+        const auto& note = sortedNotes[i];
+        
+        // Determine if it's a dot or dash based on duration
+        if (note.duration < avgDuration * dotDashThreshold) {
+            morseCode += ".";
+        } else {
+            morseCode += "-";
+        }
+        
+        // Add appropriate spacing based on gap to next note
+        if (i < sortedNotes.size() - 1) {
+            double gap = sortedNotes[i+1].startTime - (note.startTime + note.duration);
+            
+            if (gap > avgGap * letterGapThreshold) {
+                morseCode += " / "; // Word gap
+            } else if (gap > avgGap * symbolGapThreshold) {
+                morseCode += " "; // Letter gap
+            }
+            // Otherwise, it's a symbol gap (no explicit space needed)
+        }
+    }
+    
+    return morseCode;
+}
+
+juce::String DashDotConductorProcessor::convertMorseToText(const juce::String& morseCode) {
+    juce::String result;
+    juce::StringArray morseWords;
+    
+    // Split by word delimiter (/)
+    morseWords = juce::StringArray::fromTokens(morseCode, "/", "");
+    
+    for (const auto& word : morseWords) {
+        // Split by letter delimiter (space)
+        juce::StringArray letters = juce::StringArray::fromTokens(word.trim(), " ", "");
+        
+        for (const auto& letter : letters) {
+            bool found = false;
+            
+            // Find the Morse code in the lookup table
+            for (int i = 0; i < sizeof(morseTable) / sizeof(morseTable[0]); ++i) {
+                if (letter == morseTable[i].code) {
+                    result += morseTable[i].character;
+                    found = true;
+                    break;
+                }
+            }
+            
+            // If not found, add a placeholder
+            if (!found && letter.isNotEmpty()) {
+                result += "?";
+            }
+        }
+        
+        // Add a space between words
+        result += " ";
+    }
+    
+    return result.trim();
+}
+
 DashDotConductorEditor::DashDotConductorEditor(DashDotConductorProcessor& p)
     : AudioProcessorEditor(&p), processor(p)
 {
     // Set up text input
     addAndMakeVisible(titleLabel);
     titleLabel.setText("Dash Dot Conductor", juce::dontSendNotification);
-    titleLabel.setFont(juce::Font(18.0f, juce::Font::bold));
+    titleLabel.setFont(juce::Font(juce::Font::getDefaultSansSerifFontName(), 18.0f, juce::Font::bold));
     titleLabel.setJustificationType(juce::Justification::centred);
     
     addAndMakeVisible(textLabel);
@@ -366,4 +489,137 @@ DashDotConductorEditor::~DashDotConductorEditor() {
 void DashDotConductorEditor::paint(juce::Graphics& g) {
     g.fillAll(juce::Colours::white);
     g.setColour(juce::Colours::black);
+}
+
+void DashDotConductorEditor::resized() {
+    auto area = getLocalBounds().reduced(10);
+    
+    titleLabel.setBounds(area.removeFromTop(30));
+    area.removeFromTop(10);
+    
+    auto textRow = area.removeFromTop(25);
+    textLabel.setBounds(textRow.removeFromLeft(100));
+    textInput.setBounds(textRow);
+    
+    area.removeFromTop(10);
+    
+    auto morseRow = area.removeFromTop(25);
+    morseLabel.setBounds(morseRow.removeFromLeft(100));
+    morseOutput.setBounds(morseRow);
+    
+    area.removeFromTop(20);
+    
+    auto buttonRow = area.removeFromTop(30);
+    auto buttonWidth = 230;
+    generateButton.setBounds(buttonRow.withSizeKeepingCentre(buttonWidth, 30));
+    
+    area.removeFromTop(10);
+    
+    auto decodedTextRow = area.removeFromTop(25);
+    decodedTextLabel.setBounds(decodedTextRow.removeFromLeft(100));
+    decodedTextOutput.setBounds(decodedTextRow);
+    
+    area.removeFromTop(10);
+    
+    auto decodeButtonRow = area.removeFromTop(30);
+    decodeMIDIButton.setBounds(decodeButtonRow.withSizeKeepingCentre(buttonWidth, 30));
+    
+    area.removeFromTop(20);
+    
+    auto controlsArea = area.reduced(20, 0);
+    auto sliderHeight = 30;
+    
+    auto dotNoteRow = controlsArea.removeFromTop(sliderHeight);
+    dotNoteLabel.setBounds(dotNoteRow.removeFromLeft(100));
+    dotNoteSlider.setBounds(dotNoteRow);
+    
+    controlsArea.removeFromTop(5);
+    
+    auto dashNoteRow = controlsArea.removeFromTop(sliderHeight);
+    dashNoteLabel.setBounds(dashNoteRow.removeFromLeft(100));
+    dashNoteSlider.setBounds(dashNoteRow);
+    
+    controlsArea.removeFromTop(5);
+    
+    auto dotDurationRow = controlsArea.removeFromTop(sliderHeight);
+    dotDurationLabel.setBounds(dotDurationRow.removeFromLeft(100));
+    dotDurationSlider.setBounds(dotDurationRow);
+    
+    controlsArea.removeFromTop(5);
+    
+    auto dashDurationRow = controlsArea.removeFromTop(sliderHeight);
+    dashDurationLabel.setBounds(dashDurationRow.removeFromLeft(100));
+    dashDurationSlider.setBounds(dashDurationRow);
+    
+    controlsArea.removeFromTop(5);
+    
+    auto dotVelocityRow = controlsArea.removeFromTop(sliderHeight);
+    dotVelocityLabel.setBounds(dotVelocityRow.removeFromLeft(100));
+    dotVelocitySlider.setBounds(dotVelocityRow);
+    
+    controlsArea.removeFromTop(5);
+    
+    auto dashVelocityRow = controlsArea.removeFromTop(sliderHeight);
+    dashVelocityLabel.setBounds(dashVelocityRow.removeFromLeft(100));
+    dashVelocitySlider.setBounds(dashVelocityRow);
+}
+
+void DashDotConductorEditor::textEditorTextChanged(juce::TextEditor& editor) {
+    if (&editor == &textInput) {
+        juce::String morseCode = convertTextToMorse(editor.getText());
+        morseOutput.setText(morseCode, juce::dontSendNotification);
+        processor.setMorseInput(morseCode);
+    }
+}
+
+void DashDotConductorEditor::buttonClicked(juce::Button* button) {
+    if (button == &generateButton) {
+        processor.generateMIDINotes();
+    }
+    else if (button == &decodeMIDIButton) {
+        // Decode MIDI to Morse
+        juce::MidiBuffer dummyBuffer; // We'll use stored notes from the processor
+        juce::String morseCode = processor.convertMIDIToMorse(dummyBuffer);
+        morseOutput.setText(morseCode, juce::dontSendNotification);
+        
+        // Convert Morse to text
+        juce::String decodedText = processor.convertMorseToText(morseCode);
+        decodedTextOutput.setText(decodedText, juce::dontSendNotification);
+    }
+}
+
+juce::String DashDotConductorEditor::convertTextToMorse(const juce::String& text) {
+    juce::String result;
+    juce::String upperText = text.toUpperCase();
+    
+    for (int i = 0; i < upperText.length(); ++i) {
+        char c = upperText[i];
+        bool found = false;
+        
+        // Find the character in the morse table
+        for (int j = 0; j < sizeof(morseTable) / sizeof(morseTable[0]); ++j) {
+            if (morseTable[j].character == c) {
+                result += morseTable[j].code;
+                found = true;
+                break;
+            }
+        }
+        
+        // If character is not found in the table, ignore it
+        if (!found && c != ' ') {
+            continue;
+        }
+        
+        // Add space between letters (but not after a space)
+        if (i < upperText.length() - 1 && c != ' ') {
+            result += " ";
+        }
+    }
+    
+    return result;
+}
+
+// Create the audio processor
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() {
+    return new DashDotConductorProcessor();
 }
